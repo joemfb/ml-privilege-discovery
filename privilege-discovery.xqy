@@ -1,100 +1,95 @@
 xquery version "1.0-ml";
 
-module namespace priv = "http://example.com/discover-privileges";
+(:~
+ : This module provides a mechanism to discover the MarkLogic privileges that a given function requires.
+ :
+ : @author Joe Bryan
+ :)
+module namespace priv = "http://example.com/privilege-discover";
 
 import module namespace sec = "http://marklogic.com/xdmp/security" at "/MarkLogic/security.xqy";
 
 declare namespace error = "http://marklogic.com/xdmp/error";
 
-declare function priv:sec-query($param, $fn as function(*))
+declare function priv:query-security-db($param, $fn as function(*))
 {
   xdmp:invoke-function(
-    function() {
-      $fn($param)
-    },
+    function() { $fn($param) },
     <options xmlns="xdmp:eval">
-      <database>{xdmp:database("Security")}</database>
+      <database>{ xdmp:database("Security") }</database>
     </options>)
 };
 
-declare function priv:sec-update($fn as function(*))
+declare function priv:update-security-db($fn as function(*))
 {
   xdmp:invoke-function(
-    function() {
-      $fn(),
-      xdmp:commit()
-    },
+    function() { $fn(), xdmp:commit() },
     <options xmlns="xdmp:eval">
-      <database>{xdmp:database("Security")}</database>
+      <database>{ xdmp:database("Security") }</database>
       <transaction-mode>update</transaction-mode>
     </options>)
 };
 
-declare function priv:sec-prop-name($prefix as xs:string, $exist-fn as function(*)) as xs:string
+declare function priv:new-security-name(
+  $prefix as xs:string,
+  $exist-fn as function(item()) as xs:boolean
+) as xs:string
 {
   let $name := $prefix || xdmp:random(9)
   return
-    if (fn:exists(priv:sec-query($name, $exist-fn)))
-    then priv:sec-prop-name($prefix, $exist-fn)
+    if (priv:query-security-db($name, $exist-fn))
+    then priv:new-security-name($prefix, $exist-fn)
     else $name
 };
 
-declare function priv:user-name() as xs:string
+declare function priv:new-user-name() as xs:string
 {
-  priv:sec-prop-name("priv-test-user", sec:user-exists(?))
+  priv:new-security-name("priv-test-user", sec:user-exists(?))
 };
 
-declare function priv:role-name() as xs:string
+declare function priv:new-role-name() as xs:string
 {
-  priv:sec-prop-name("priv-test-role", sec:role-exists(?))
+  priv:new-security-name("priv-test-role", sec:role-exists(?))
 };
 
 declare function priv:create-user($name as xs:string, $role as xs:string) as xs:unsignedLong
 {
-  priv:sec-update(function() {
+  priv:update-security-db(function() {
     sec:create-user($name, "Temp user for privilege testing", $name, $role, (), ())
   })
 };
 
 declare function priv:create-role($name as xs:string) as xs:unsignedLong
 {
-  priv:sec-update(function() {
+  priv:update-security-db(function() {
     sec:create-role($name, "Temp role for privilege testing", (), (), ())
   })
 };
 
 declare function priv:add-privilege($privilege as xs:string, $role as xs:string)
 {
-  priv:sec-update(function() {
+  priv:update-security-db(function() {
     sec:privilege-add-roles($privilege, "execute", $role)
   })
 };
 
-declare function priv:privilege-roles($privilege as xs:string)
+declare function priv:privilege-roles($privilege as xs:string) as xs:string*
 {
-  priv:sec-query($privilege, sec:privilege-get-roles(?, "execute"))
+  priv:query-security-db($privilege, sec:privilege-get-roles(?, "execute"))
 };
 
-declare function priv:remove($user as xs:string, $role as xs:string)
-{
-  priv:sec-update(function() {
-    sec:remove-user($user)
-  }),
-  priv:sec-update(function() {
-    sec:remove-role($role)
-  })
-};
-
-declare function priv:wrap-test($user-id as xs:unsignedLong, $fn as function(*)) as function(*)
+declare function priv:prepare-test(
+  $user-id as xs:unsignedLong,
+  $database as xs:unsignedLong,
+  $fn as function(*)
+) as function(*)
 {
   function() {
     xdmp:invoke-function(
-      function() {
-        $fn(),
-        xdmp:rollback()
-      },
+      function() { $fn(), xdmp:rollback() },
       <options xmlns="xdmp:eval">
         <user-id>{ $user-id }</user-id>
+        <database>{ $database }</database>
         <transaction-mode>update</transaction-mode>
       </options>)
   }
@@ -109,7 +104,7 @@ declare function priv:execute-test(
 {
   try {
     $test(),
-    priv:remove($user, $role),
+    priv:cleanup($user, $role),
     $privileges
   }
   catch ($ex) {
@@ -120,30 +115,41 @@ declare function priv:execute-test(
         priv:add-privilege($privilege, $role),
         priv:execute-test($test, $user, $role, ($privileges, $privilege))
       )
-    else xdmp:rethrow()
+    else (
+      priv:cleanup($user, $role),
+      xdmp:rethrow()
+    )
   }
 };
 
-declare function priv:test($fn as function(*)) as xs:string*
+declare function priv:cleanup($user as xs:string, $role as xs:string)
 {
-  let $user := priv:user-name()
-  let $role := priv:role-name()
+  priv:update-security-db(function() {
+    sec:remove-user($user)
+  }),
+  priv:update-security-db(function() {
+    sec:remove-role($role)
+  })
+};
+
+declare function priv:privileges($fn as function(*)) as xs:string*
+{
+  priv:privileges($fn, xdmp:database())
+};
+
+declare function priv:privileges($fn as function(*), $database as xs:unsignedLong?) as xs:string*
+{
+  let $user := priv:new-user-name()
+  let $role := priv:new-role-name()
   let $user-id := (
     priv:create-role($role),
     priv:add-privilege("http://marklogic.com/xdmp/privileges/any-uri", $role),
     priv:create-user($user, $role)
   )[fn:last()]
-  let $test := priv:wrap-test($user-id, $fn)
-  return
-    try {
-      for $privilege in priv:execute-test($test, $user, $role, ())
-      return (
-        $privilege,
-        fn:string-join(priv:privilege-roles($privilege), ", ")
-      )
-    }
-    catch ($ex) {
-      priv:remove($user, $role),
-      xdmp:rethrow()
-    }
+  let $test := priv:prepare-test($user-id, $database, $fn)
+  for $privilege in priv:execute-test($test, $user, $role, ())
+  return (
+    $privilege,
+    fn:string-join(priv:privilege-roles($privilege), ", ")
+  )
 };
