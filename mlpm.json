@@ -1,0 +1,6 @@
+{
+  "name": "ml-privilege-discovery",
+  "version": "1.0.0",
+  "description": "an XQuery library for discovering the privileges required by a function",
+  "repository": "https://github.com/joemfb/ml-privilege-discovery.git"
+}
